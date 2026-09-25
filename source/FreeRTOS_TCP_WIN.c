@@ -2073,7 +2073,7 @@
                      * of txStream may be advanced. */
                     ulBytesConfirmed += ulDataLength;
 
-                    /* Don't \point to this segment any more, 
+                    /* Don't point to this segment any more,
                      * a subsequent lTCPWindowTxAdd() cannot read the freed slot. */
                     if( pxWindow->pxHeadSegment == pxSegment )
                     {
