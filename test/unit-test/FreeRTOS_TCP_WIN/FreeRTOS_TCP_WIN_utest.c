@@ -2248,6 +2248,57 @@ void test_ulTCPWindowTxAck_curr_seq_gt_seq( void )
     TEST_ASSERT_EQUAL( 0, ulReturn );
 }
 
+/**
+ * @brief An ACK whose acknowledgement number is above SND.NXT acknowledges
+ *        data that was never transmitted.  Per RFC 9293 3.10.7.4 it must be
+ *        rejected: ulTCPWindowTxAck() returns 0 and does not enter
+ *        prvTCPWindowTxCheckAck() (no list traversal is mocked, so any attempt
+ *        to walk the Tx segment list would fail this test).  This guards
+ *        against the queued-but-unsent TX data being silently discarded.
+ */
+void test_ulTCPWindowTxAck_seq_above_snd_nxt_rejected( void )
+{
+    uint32_t ulReturn;
+    TCPWindow_t xWindow = { 0 };
+
+    /* SND.UNA = 32, SND.NXT = 60.  The ACK (100) is above SND.NXT. */
+    xWindow.tx.ulCurrentSequenceNumber = 32;
+    xWindow.ulNextTxSequenceNumber = 60;
+
+    ulReturn = ulTCPWindowTxAck( &xWindow, 100 );
+
+    TEST_ASSERT_EQUAL( 0, ulReturn );
+}
+
+/**
+ * @brief An ACK exactly at SND.NXT acknowledges all outstanding data and is
+ *        still acceptable, so ulTCPWindowTxAck() proceeds into
+ *        prvTCPWindowTxCheckAck().  This confirms the new upper-bound check
+ *        does not reject legitimate full-window ACKs.
+ */
+void test_ulTCPWindowTxAck_seq_at_snd_nxt_accepted( void )
+{
+    uint32_t ulReturn;
+    TCPWindow_t xWindow = { 0 };
+    TCPSegment_t mockSegment = { 0 };
+    ListItem_t mockListItem;
+
+    /* SND.UNA = 32, SND.NXT = 60.  The ACK (60) equals SND.NXT. */
+    xWindow.tx.ulCurrentSequenceNumber = 32;
+    xWindow.ulNextTxSequenceNumber = 60;
+    mockSegment.ulSequenceNumber = 32;
+    mockSegment.u.bits.bAcked = pdFALSE_UNSIGNED;
+    mockSegment.lDataLength = 28;
+    /* ->prvTCPWindowTxCheckAck */
+    listGET_NEXT_ExpectAnyArgsAndReturn( ( ListItem_t * ) &mockListItem );
+    listGET_LIST_ITEM_OWNER_ExpectAnyArgsAndReturn( &mockSegment );
+    listGET_NEXT_ExpectAnyArgsAndReturn( ( ListItem_t * ) &xWindow.xTxSegments.xListEnd );
+
+    ulReturn = ulTCPWindowTxAck( &xWindow, 60 );
+
+    TEST_ASSERT_EQUAL( 28, ulReturn );
+}
+
 void test_ulTCPWindowTxAck_curr_seq_lt_seq_no_list_items( void )
 {
     uint32_t ulSequenceNumber = 56;
@@ -2255,6 +2306,7 @@ void test_ulTCPWindowTxAck_curr_seq_lt_seq_no_list_items( void )
     TCPWindow_t xWindow = { 0 };
 
     xWindow.tx.ulCurrentSequenceNumber = 32;
+    xWindow.ulNextTxSequenceNumber = 100;
     /* ->prvTCPWindowTxCheckAck */
     listGET_NEXT_ExpectAnyArgsAndReturn( ( ListItem_t * ) &xWindow.xTxSegments.xListEnd );
 
@@ -2274,6 +2326,7 @@ void test_ulTCPWindowTxAck_curr_seq_lt_seq_2( void )
     ListItem_t mockNextListItem;
 
     xWindow.tx.ulCurrentSequenceNumber = 32;
+    xWindow.ulNextTxSequenceNumber = 100;
     mockSegment.ulSequenceNumber = 45;
     mockSegment.u.bits.bAcked = pdFALSE_UNSIGNED;
     /* ->prvTCPWindowTxCheckAck */
@@ -2296,6 +2349,7 @@ void test_ulTCPWindowTxAck_curr_seq_lt_seq_3_continue_loop( void )
     ListItem_t mockListItem;
 
     xWindow.tx.ulCurrentSequenceNumber = 32;
+    xWindow.ulNextTxSequenceNumber = 100;
     mockSegment.ulSequenceNumber = 31;
     /* ->prvTCPWindowTxCheckAck */
     listGET_NEXT_ExpectAnyArgsAndReturn( ( ListItem_t * ) &mockListItem );
@@ -2320,6 +2374,7 @@ void test_ulTCPWindowTxAck_curr_seq_lt_seq_4( void )
 
     xTCPWindowLoggingLevel = 2;
     xWindow.tx.ulCurrentSequenceNumber = 32;
+    xWindow.ulNextTxSequenceNumber = 100;
     mockSegment.ulSequenceNumber = 32;
     mockSegment.u.bits.bAcked = pdTRUE_UNSIGNED;
     mockSegment.lDataLength = 2000;
@@ -2346,6 +2401,7 @@ void test_ulTCPWindowTxAck_curr_seq_lt_seq_4_acked_false( void )
     ListItem_t mockNextListItem;
 
     xWindow.tx.ulCurrentSequenceNumber = 32;
+    xWindow.ulNextTxSequenceNumber = 100;
     mockSegment.ulSequenceNumber = 32;
     mockSegment.u.bits.bAcked = pdFALSE_UNSIGNED;
     mockSegment.lDataLength = 2000;
@@ -2369,6 +2425,7 @@ void test_ulTCPWindowTxAck_curr_seq_lt_seq_5_acked_false( void )
     ListItem_t mockListItem;
 
     xWindow.tx.ulCurrentSequenceNumber = 32;
+    xWindow.ulNextTxSequenceNumber = 100;
     mockSegment.ulSequenceNumber = 32;
     mockSegment.u.bits.bAcked = pdFALSE_UNSIGNED;
     mockSegment.lDataLength = 20;
@@ -2382,6 +2439,40 @@ void test_ulTCPWindowTxAck_curr_seq_lt_seq_5_acked_false( void )
     TEST_ASSERT_EQUAL( 20, ulReturn );
 }
 
+/**
+ * @brief When prvTCPWindowTxCheckAck() frees the head TX segment (the segment
+ *        at the left edge of the transmission window), pxWindow->pxHeadSegment
+ *        must be cleared so a later lTCPWindowTxAdd() cannot dereference the
+ *        freed slot.  This test drives the left-edge free branch with
+ *        pxHeadSegment aimed at the freed segment and asserts it is nulled.
+ */
+void test_ulTCPWindowTxAck_frees_head_segment_clears_pxHeadSegment( void )
+{
+    uint32_t ulSequenceNumber = 56;
+    uint32_t ulReturn;
+    TCPWindow_t xWindow = { 0 };
+    TCPSegment_t mockSegment = { 0 };
+    ListItem_t mockListItem;
+
+    xWindow.tx.ulCurrentSequenceNumber = 32;
+    xWindow.ulNextTxSequenceNumber = 100;
+    mockSegment.ulSequenceNumber = 32;
+    mockSegment.u.bits.bAcked = pdFALSE_UNSIGNED;
+    mockSegment.lDataLength = 20;
+    /* pxHeadSegment points at the segment that is about to be freed. */
+    xWindow.pxHeadSegment = &mockSegment;
+    /* ->prvTCPWindowTxCheckAck */
+    listGET_NEXT_ExpectAnyArgsAndReturn( ( ListItem_t * ) &mockListItem );
+    listGET_LIST_ITEM_OWNER_ExpectAnyArgsAndReturn( &mockSegment );
+    listGET_NEXT_ExpectAnyArgsAndReturn( ( ListItem_t * ) &xWindow.xTxSegments.xListEnd );
+
+    ulReturn = ulTCPWindowTxAck( &xWindow, ulSequenceNumber );
+
+    TEST_ASSERT_EQUAL( 20, ulReturn );
+    /* The freed head segment must no longer be reachable. */
+    TEST_ASSERT_NULL( xWindow.pxHeadSegment );
+}
+
 /* covering code inside prvTCPWindowTxCheckAck */
 void test_ulTCPWindowTxAck_curr_seq_lt_seq_6_acked_false( void )
 {
@@ -2393,6 +2484,7 @@ void test_ulTCPWindowTxAck_curr_seq_lt_seq_6_acked_false( void )
     BaseType_t xBackup = xTCPWindowLoggingLevel;
 
     xWindow.tx.ulCurrentSequenceNumber = 32;
+    xWindow.ulNextTxSequenceNumber = 100;
     mockSegment.ulSequenceNumber = 32;
     mockSegment.u.bits.bAcked = pdFALSE_UNSIGNED;
     mockSegment.lDataLength = 20;
@@ -2423,6 +2515,7 @@ void ignore_test_ulTCPWindowTxAck_curr_seq_lt_seq_7_acked_false( void )
     initializeListItem( &mockListItem );
 
     xWindow.tx.ulCurrentSequenceNumber = 32;
+    xWindow.ulNextTxSequenceNumber = 100;
     mockSegment.u.bits.bAcked = pdFALSE_UNSIGNED;
     mockSegment.lDataLength = 24;
 

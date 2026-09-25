@@ -2073,6 +2073,13 @@
                      * of txStream may be advanced. */
                     ulBytesConfirmed += ulDataLength;
 
+                    /* Don't \point to this segment any more, 
+                     * a subsequent lTCPWindowTxAdd() cannot read the freed slot. */
+                    if( pxWindow->pxHeadSegment == pxSegment )
+                    {
+                        pxWindow->pxHeadSegment = NULL;
+                    }
+
                     /* All segments below tx.ulCurrentSequenceNumber may be freed. */
                     vTCPWindowFree( pxSegment );
 
@@ -2192,6 +2199,12 @@
 
             if( xSequenceLessThanOrEqual( ulSequenceNumber, ulFirstSequence ) != pdFALSE )
             {
+                /* The ACK is at or below SND.UNA: it acknowledges nothing new. */
+                ulReturn = 0U;
+            }
+            else if( xSequenceGreaterThan( ulSequenceNumber, pxWindow->ulNextTxSequenceNumber ) != pdFALSE )
+            {
+                /* RFC 9293 section 3.10.7.4 requires ACKs processed only if within window */
                 ulReturn = 0U;
             }
             else
